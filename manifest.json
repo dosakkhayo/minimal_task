@@ -1,7 +1,7 @@
 {
 	"id": "minimal-task",
 	"name": "minimal task",
-	"version": "1.2.0",
+	"version": "1.1.0",
 	"author": "dosakkhayo",
 	"description": "할 일이 완료되면 자동으로 다른 파일로 이동하는 플러그인",
 	"main": "main.js",

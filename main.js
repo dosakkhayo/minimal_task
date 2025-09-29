@@ -3981,45 +3981,104 @@ var DEFAULT_SETTINGS = {
   taskFile: "task.md",
   doneFile: "task_done.md",
   dateFormat: "",
-  timeFormat: ""
+  autoOpenTaskFile: true
 };
 var MinimalTaskPlugin = class extends import_obsidian.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new MinimalTaskSettingTab(this.app, this));
+    this.addCommand({
+      id: "open-task-file",
+      name: "\uC791\uC5C5 \uD30C\uC77C \uC5F4\uAE30",
+      callback: () => this.openTaskFile()
+    });
+    this.addCommand({
+      id: "open-done-file",
+      name: "\uC644\uB8CC \uD30C\uC77C \uC5F4\uAE30",
+      callback: () => this.openDoneFile()
+    });
+    this.addRibbonIcon("checkmark", "\uC791\uC5C5 \uD30C\uC77C \uC5F4\uAE30", () => {
+      this.openTaskFile();
+    });
+    this.addRibbonIcon("check-circle", "\uC644\uB8CC \uD30C\uC77C \uC5F4\uAE30", () => {
+      this.openDoneFile();
+    });
+    await this.checkRepeatTaskDates();
+    this.app.workspace.onLayoutReady(async () => {
+      if (this.settings.autoOpenTaskFile) {
+        await this.openTaskFile();
+      }
+    });
     this.registerEvent(
       this.app.vault.on("modify", async (file) => {
-        if (file instanceof import_obsidian.TFile && file.path === this.settings.taskFile) {
+        if (!(file instanceof import_obsidian.TFile)) return;
+        if (file.path === this.settings.taskFile) {
           await this.processTaskFile(file);
         }
       })
     );
-    this.registerEvent(
-      this.app.workspace.on("editor-change", async (_, ctx) => {
-        const file = ctx.file;
-        if (file && file.path === this.settings.taskFile) {
-          await this.processTaskFile(file);
+  }
+  async openTaskFile() {
+    const taskFile = this.app.vault.getAbstractFileByPath(this.settings.taskFile);
+    if (taskFile instanceof import_obsidian.TFile) {
+      const leaves = this.app.workspace.getLeavesOfType("markdown");
+      const targetLeaf = leaves.find((leaf) => {
+        var _a;
+        const view = leaf.view;
+        return ((_a = view == null ? void 0 : view.file) == null ? void 0 : _a.path) === this.settings.taskFile;
+      });
+      if (targetLeaf) {
+        this.app.workspace.setActiveLeaf(targetLeaf);
+      } else {
+        const leaf = this.app.workspace.activeLeaf;
+        if (leaf) {
+          await leaf.openFile(taskFile);
         }
-      })
-    );
+      }
+    } else {
+      new import_obsidian.Notice(`\uC124\uC815\uC5D0\uC11C \uC791\uC5C5 \uD30C\uC77C\uC744 \uC9C0\uC815\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.`);
+    }
   }
   async processTaskFile(file) {
     const content = await this.app.vault.read(file);
     const lines = content.split("\n");
     const remaining = [];
     const doneTasks = [];
+    let inRepeatSection = false;
     const dateFormat = this.settings.dateFormat || "YYYY-MM-DD";
-    const timeFormat = this.settings.timeFormat || "HH:mm";
     for (const line of lines) {
+      if (line.trim() === "### \uBC18\uBCF5 \uC791\uC5C5") {
+        inRepeatSection = true;
+        remaining.push(line);
+        continue;
+      } else if (line.trim() === "### \uC77C\uBC18 \uC791\uC5C5") {
+        inRepeatSection = false;
+        remaining.push(line);
+        continue;
+      } else if (line.startsWith("### ")) {
+        inRepeatSection = false;
+        remaining.push(line);
+        continue;
+      }
       if (/^\s*[-*]\s+\[[xX]\]/.test(line)) {
-        const time = (0, import_moment.default)().format(timeFormat);
-        doneTasks.push(`${line.trim()} (${time})`);
+        if (inRepeatSection) {
+          const taskText = line.replace(/^\s*[-*]\s+\[[xX]\]\s*/, "").replace(/\([^)]+\)\s*$/, "").trim();
+          const tomorrow = (0, import_moment.default)().add(1, "day").format(dateFormat);
+          const newLine = `- [ ] ${taskText} (${tomorrow})`;
+          remaining.push(newLine);
+          doneTasks.push(line.trim());
+        } else {
+          doneTasks.push(line.trim());
+        }
       } else {
         remaining.push(line);
       }
     }
     if (doneTasks.length === 0) return;
     await this.app.vault.modify(file, remaining.join("\n"));
+    await this.appendDoneTasks(doneTasks, dateFormat);
+  }
+  async appendDoneTasks(tasks, dateFormat) {
     const dateHeader = `### ${(0, import_moment.default)().format(dateFormat)}`;
     let doneFile = this.app.vault.getAbstractFileByPath(this.settings.doneFile);
     let doneTFile;
@@ -4042,16 +4101,16 @@ var MinimalTaskPlugin = class extends import_obsidian.Plugin {
         continue;
       }
       if (inTargetSection && line.startsWith("### ")) {
-        newContent.push(...doneTasks);
+        newContent.push(...tasks);
         inTargetSection = false;
       }
       newContent.push(line);
     }
     if (sectionFound && inTargetSection) {
-      newContent.push(...doneTasks);
+      newContent.push(...tasks);
     } else if (!sectionFound) {
       if (newContent.length > 0) newContent.push("");
-      newContent.push(dateHeader, ...doneTasks);
+      newContent.push(dateHeader, ...tasks);
     }
     await this.app.vault.modify(doneTFile, newContent.join("\n").trim());
   }
@@ -4060,6 +4119,61 @@ var MinimalTaskPlugin = class extends import_obsidian.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+  async checkRepeatTaskDates() {
+    const taskFile = this.app.vault.getAbstractFileByPath(this.settings.taskFile);
+    if (!(taskFile instanceof import_obsidian.TFile)) return;
+    const content = await this.app.vault.read(taskFile);
+    const lines = content.split("\n");
+    const updatedLines = [];
+    let inRepeatSection = false;
+    let hasChanges = false;
+    const dateFormat = this.settings.dateFormat || "YYYY-MM-DD";
+    const today = (0, import_moment.default)().format(dateFormat);
+    for (const line of lines) {
+      if (line.trim() === "### \uBC18\uBCF5 \uC791\uC5C5") {
+        inRepeatSection = true;
+        updatedLines.push(line);
+        continue;
+      } else if (line.trim() === "### \uC77C\uBC18 \uC791\uC5C5") {
+        inRepeatSection = false;
+        updatedLines.push(line);
+        continue;
+      } else if (line.startsWith("### ")) {
+        inRepeatSection = false;
+        updatedLines.push(line);
+        continue;
+      }
+      if (inRepeatSection && /^\s*[-*]\s+\[[xX]\]/.test(line) && line.includes(`(${today})`)) {
+        const taskText = line.replace(/^\s*[-*]\s+\[[xX]\]\s*/, "").replace(/\([^)]+\)\s*$/, "").trim();
+        const newLine = `- [ ] ${taskText} (${today})`;
+        updatedLines.push(newLine);
+        hasChanges = true;
+      } else {
+        updatedLines.push(line);
+      }
+    }
+    if (hasChanges) {
+      await this.app.vault.modify(taskFile, updatedLines.join("\n"));
+    }
+  }
+  async openDoneFile() {
+    const doneFile = this.app.vault.getAbstractFileByPath(this.settings.doneFile);
+    if (doneFile instanceof import_obsidian.TFile) {
+      const leaves = this.app.workspace.getLeavesOfType("markdown");
+      const targetLeaf = leaves.find((leaf) => {
+        var _a;
+        const view = leaf.view;
+        return ((_a = view == null ? void 0 : view.file) == null ? void 0 : _a.path) === this.settings.doneFile;
+      });
+      if (targetLeaf) {
+        this.app.workspace.setActiveLeaf(targetLeaf);
+      } else {
+        await this.app.workspace.getLeaf().openFile(doneFile);
+      }
+    } else {
+      new import_obsidian.Notice(`\uC124\uC815\uC5D0\uC11C \uC644\uB8CC \uD30C\uC77C\uC744 \uC9C0\uC815\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.`);
+    }
   }
 };
 var MinimalTaskSettingTab = class extends import_obsidian.PluginSettingTab {
@@ -4070,23 +4184,51 @@ var MinimalTaskSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "minimal task settings" });
-    new import_obsidian.Setting(containerEl).setName("Task file path").setDesc("Path to the markdown file containing your tasks").addText((text) => text.setPlaceholder("e.g. task.md").setValue(this.plugin.settings.taskFile).onChange(async (value) => {
+    containerEl.createEl("h2", { text: "\uC791\uC5C5 \uAD00\uB9AC \uC124\uC815" });
+    new import_obsidian.Setting(containerEl).setName("\uC791\uC5C5 \uD30C\uC77C \uACBD\uB85C").setDesc("\uC77C\uBC18 \uC791\uC5C5\uACFC \uBC18\uBCF5 \uC791\uC5C5\uC774 \uD3EC\uD568\uB41C \uB9C8\uD06C\uB2E4\uC6B4 \uD30C\uC77C\uC758 \uACBD\uB85C").addText((text) => text.setPlaceholder("\uC608: task.md").setValue(this.plugin.settings.taskFile).onChange(async (value) => {
       this.plugin.settings.taskFile = value.trim();
       await this.plugin.saveSettings();
+    })).addButton((button) => button.setButtonText("\uD30C\uC77C \uC120\uD0DD").onClick(() => {
+      new FileSuggestModal(this.app, this.plugin, async (file) => {
+        this.plugin.settings.taskFile = file.path;
+        await this.plugin.saveSettings();
+        this.display();
+      }).open();
     }));
-    new import_obsidian.Setting(containerEl).setName("Done file path").setDesc("Path to the file where checked tasks will be moved").addText((text) => text.setPlaceholder("e.g. task_done.md").setValue(this.plugin.settings.doneFile).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("\uC644\uB8CC \uD30C\uC77C \uACBD\uB85C").setDesc("\uC644\uB8CC\uB41C \uC791\uC5C5\uC774 \uAE30\uB85D\uB420 \uD30C\uC77C\uC758 \uACBD\uB85C").addText((text) => text.setPlaceholder("\uC608: task_done.md").setValue(this.plugin.settings.doneFile).onChange(async (value) => {
       this.plugin.settings.doneFile = value.trim();
       await this.plugin.saveSettings();
+    })).addButton((button) => button.setButtonText("\uD30C\uC77C \uC120\uD0DD").onClick(() => {
+      new FileSuggestModal(this.app, this.plugin, async (file) => {
+        this.plugin.settings.doneFile = file.path;
+        await this.plugin.saveSettings();
+        this.display();
+      }).open();
     }));
-    new import_obsidian.Setting(containerEl).setName("Date format").setDesc("Leave empty to use default: YYYY-MM-DD").addText((text) => text.setPlaceholder("YYYY-MM-DD").setValue(this.plugin.settings.dateFormat).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("\uB0A0\uC9DC \uD615\uC2DD").setDesc("\uBE44\uC6CC\uB450\uBA74 \uAE30\uBCF8\uAC12 \uC0AC\uC6A9: YYYY-MM-DD").addText((text) => text.setPlaceholder("YYYY-MM-DD").setValue(this.plugin.settings.dateFormat).onChange(async (value) => {
       this.plugin.settings.dateFormat = value.trim();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Time format").setDesc("Leave empty to use default: HH:mm").addText((text) => text.setPlaceholder("HH:mm").setValue(this.plugin.settings.timeFormat).onChange(async (value) => {
-      this.plugin.settings.timeFormat = value.trim();
+    new import_obsidian.Setting(containerEl).setName("\uC791\uC5C5 \uD30C\uC77C \uC790\uB3D9 \uC5F4\uAE30").setDesc("vault\uAC00 \uC900\uBE44\uB418\uBA74 task \uD30C\uC77C\uC744 \uC790\uB3D9\uC73C\uB85C \uC5F4\uC9C0 \uC5EC\uBD80").addToggle((toggle) => toggle.setValue(this.plugin.settings.autoOpenTaskFile).onChange(async (value) => {
+      this.plugin.settings.autoOpenTaskFile = value;
       await this.plugin.saveSettings();
     }));
+  }
+};
+var FileSuggestModal = class extends import_obsidian.FuzzySuggestModal {
+  constructor(app, plugin, onSelect) {
+    super(app);
+    this.plugin = plugin;
+    this.onSelect = onSelect;
+  }
+  getItems() {
+    return this.app.vault.getMarkdownFiles();
+  }
+  getItemText(item) {
+    return item.path;
+  }
+  onChooseItem(item, evt) {
+    this.onSelect(item);
   }
 };
 /*! Bundled license information:
